@@ -24,6 +24,18 @@ heap.
 | Heap | none, apart from the one UDP socket |
 | Code | about 5.7 KB |
 
+## Installation
+
+**PlatformIO** - add it to `lib_deps` in your `platformio.ini`:
+
+```ini
+lib_deps =
+    scardus/MicroMDNS@^0.1.0
+```
+
+**Arduino IDE** - download this repository as a ZIP and use
+*Sketch > Include Library > Add .ZIP Library...*
+
 ## Quick start
 
 ```cpp
@@ -107,6 +119,17 @@ These are deliberate, to keep the responder small and the main loop fast:
   a WiFiManager setup portal.
 - **IPv4 only.**
 - **No service discovery client** - it answers, it never asks.
+
+## Running the tests
+
+The packet parsing and building is unit tested on your PC - no board needed:
+
+```
+pio test -e native
+```
+
+`pio check -e nodemcuv2` runs static analysis. GitHub Actions runs both, and
+builds the example, on every push.
 
 ## Licence
 
