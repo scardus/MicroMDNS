@@ -150,10 +150,11 @@ bool mdnsDecodeName(const uint8_t* pkt, size_t len, size_t pos,
 
 // Work out what, if anything, the query in pkt[0..len) asks us to answer.
 // srcPort is the UDP source port, used to spot legacy (non-5353) resolvers.
+// directUnicast means the query was addressed to our station IP, not the group.
 // Returns false if the packet isn't a query we should act on; plan is filled
 // in either way, with replyMask 0 when there is nothing to say.
 bool mdnsParseQuery(const uint8_t* pkt, size_t len, const MdnsNames& names,
-                    uint16_t srcPort, MdnsQueryPlan* plan);
+                    uint16_t srcPort, MdnsQueryPlan* plan, bool directUnicast = false);
 
 // Of the records in mask, return only those that may be multicast at time now
 // (milliseconds): anything multicast less than MDNS_MULTICAST_GAP_MS ago is

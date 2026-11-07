@@ -277,7 +277,9 @@ void mdnsLoop() {
     if (s_udp.remoteIP() == WiFi.localIP()) continue;
 
     MdnsQueryPlan plan;
-    if (!mdnsParseQuery(s_rx, (size_t)len, s_names, s_udp.remotePort(), &plan)) continue;
+    bool directUnicast = (s_udp.destinationIP() == WiFi.localIP());
+    if (!mdnsParseQuery(s_rx, (size_t)len, s_names, s_udp.remotePort(),
+                         &plan, directUnicast)) continue;
     if (plan.replyMask == 0) continue;
 
     sendResponse(plan, s_udp.remoteIP(), s_udp.remotePort());
