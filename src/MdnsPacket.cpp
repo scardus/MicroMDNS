@@ -214,7 +214,7 @@ static uint8_t replyMaskForQuestion(const char* ours, uint16_t qType,
 }
 
 bool mdnsParseQuery(const uint8_t* pkt, size_t len, const MdnsNames& names,
-                    uint16_t srcPort, MdnsQueryPlan* plan) {
+                    uint16_t srcPort, MdnsQueryPlan* plan, bool directUnicast) {
   *plan = MdnsQueryPlan();   // every field back to its default
 
   if (len < MDNS_HEADER_LEN) return false;
@@ -238,6 +238,7 @@ bool mdnsParseQuery(const uint8_t* pkt, size_t len, const MdnsNames& names,
 
   size_t pos = MDNS_HEADER_LEN;
   char   name[MDNS_MAX_NAME];
+  bool   wantsMulticast = false;
 
   for (uint16_t q = 0; q < qdCount; q++) {
     size_t next = 0;
@@ -248,14 +249,15 @@ bool mdnsParseQuery(const uint8_t* pkt, size_t len, const MdnsNames& names,
     uint16_t qClass = readU16(pkt, next + 2);
     pos = next + 4;
 
-    // Top bit of QCLASS is the mDNS "answer me directly, please" request.
-    if (qClass & 0x8000) plan->unicast = true;
-
     uint16_t klass = (uint16_t)(qClass & 0x7FFF);
     if (klass != MDNS_CLASS_IN && klass != MDNS_CLASS_ANY) continue;
 
     const char* ours = findOurName(name, names);
     uint8_t     mask = replyMaskForQuestion(ours, qType, names);
+    if (mask == 0) continue;
+
+    // Only a question we can answer may choose where our reply goes.
+    if (!(qClass & 0x8000)) wantsMulticast = true;
 
     // Keep the first question we can answer, to repeat back to a legacy
     // resolver. The name kept is ours, not the packet's, so it outlives it.
@@ -265,6 +267,12 @@ bool mdnsParseQuery(const uint8_t* pkt, size_t len, const MdnsNames& names,
       plan->echoClass = klass;
     }
     plan->replyMask |= mask;
+  }
+
+  // QU questions also accept multicast, so one multicast reply can answer a
+  // mixed query. Legacy and directly addressed queries go back to the sender.
+  if (plan->replyMask != 0) {
+    plan->unicast = plan->legacy || directUnicast || !wantsMulticast;
   }
 
   // The answer sections are deliberately not read - see the file header.

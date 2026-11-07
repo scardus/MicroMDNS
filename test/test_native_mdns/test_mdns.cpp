@@ -454,6 +454,128 @@ void test_a_truncated_second_question_does_not_lose_the_first(void) {
   TEST_ASSERT_EQUAL_UINT8(MDNS_REPLY_A | MDNS_REPLY_NSEC, plan.replyMask);
 }
 
+// A query can bundle questions for several devices. Only questions we can
+// answer may choose where our reply goes. Check both orders, then inspect the
+// packet so changing the route cannot lose records or change legacy headers.
+static void checkTwoQuestionRouting(bool hostQu, const char* otherName,
+                                     uint16_t otherType, uint16_t otherClass,
+                                     bool unicast, uint8_t mask,
+                                     uint16_t srcPort = 5353,
+                                     bool directUnicast = false) {
+  for (int order = 0; order < 2; order++) {
+    uint8_t pkt[256];
+    size_t pos = buildQuery(pkt, order == 0 ? g_names.host : otherName,
+                            order == 0 ? MDNS_TYPE_A : otherType,
+                            order == 0 ? (hostQu ? 0x8001 : 1) : otherClass,
+                            0xBEEF);
+    pkt[5] = 2;
+    pos = putName(pkt, pos, order == 0 ? otherName : g_names.host);
+    pos = putU16(pkt, pos, order == 0 ? otherType : MDNS_TYPE_A);
+    pos = putU16(pkt, pos, order == 0 ? otherClass : (hostQu ? 0x8001 : 1));
+
+    MdnsQueryPlan plan;
+    TEST_ASSERT_TRUE(mdnsParseQuery(pkt, pos, g_names, srcPort, &plan, directUnicast));
+    TEST_ASSERT_EQUAL(unicast, plan.unicast);
+    TEST_ASSERT_EQUAL_UINT8(mask, plan.replyMask);
+
+    uint8_t out[MDNS_TX_SIZE];
+    size_t len = mdnsBuildResponse(out, sizeof(out), plan, g_names, TEST_IP, 80, g_txt);
+    TEST_ASSERT_TRUE(len > 12);
+    bool legacy = (srcPort != 5353);
+    TEST_ASSERT_EQUAL(legacy, plan.legacy);
+    TEST_ASSERT_EQUAL_UINT16(legacy ? 0xBEEF : 0, getU16(out, 0));
+    TEST_ASSERT_EQUAL_UINT16(0x8400, getU16(out, 2));
+    TEST_ASSERT_EQUAL_UINT16(legacy ? 1 : 0, getU16(out, 4));
+
+    Rec recs[8];
+    int count = walkAnswers(out, len, recs, 8);
+    uint8_t sentMask = legacy ? (uint8_t)(mask & ~MDNS_REPLY_NSEC) : mask;
+    int expectedCount = 0;
+    for (uint8_t bit = 0; bit < 8; bit++) {
+      if (sentMask & (1u << bit)) expectedCount++;
+    }
+    TEST_ASSERT_EQUAL_INT(expectedCount, count);
+    const Rec* a = findRec(recs, count, MDNS_TYPE_A);
+    TEST_ASSERT_NOT_NULL(a);
+    TEST_ASSERT_EQUAL_STRING(g_names.host, a->name);
+    const uint8_t ip[] = { 192, 168, 0, 207 };
+    TEST_ASSERT_EQUAL_UINT16(sizeof(ip), a->rdLen);
+    TEST_ASSERT_EQUAL_UINT8_ARRAY(ip, a->rdata, sizeof(ip));
+    TEST_ASSERT_EQUAL_UINT16(legacy ? 1 : 0x8001, a->rrClass);
+    TEST_ASSERT_EQUAL_UINT32(legacy ? 10 : 120, a->ttl);
+    if (mask & MDNS_REPLY_SRV) {
+      TEST_ASSERT_NOT_NULL(findRec(recs, count, MDNS_TYPE_SRV));
+    }
+  }
+}
+
+void test_unrelated_qu_question_does_not_change_multicast_reply(void) {
+  checkTwoQuestionRouting(false, "somebody-else.local", MDNS_TYPE_A, 0x8001,
+                           false, MDNS_REPLY_A | MDNS_REPLY_NSEC);
+}
+
+void test_unrelated_qm_question_does_not_change_unicast_reply(void) {
+  checkTwoQuestionRouting(true, "somebody-else.local", MDNS_TYPE_A, 1,
+                           true, MDNS_REPLY_A | MDNS_REPLY_NSEC);
+}
+
+void test_foreign_class_qu_question_does_not_change_multicast_reply(void) {
+  checkTwoQuestionRouting(false, g_names.host, MDNS_TYPE_A, 0x8003,
+                           false, MDNS_REPLY_A | MDNS_REPLY_NSEC);
+}
+
+void test_unanswerable_qu_question_does_not_change_multicast_reply(void) {
+  checkTwoQuestionRouting(false, g_names.service, MDNS_TYPE_A, 0x8001,
+                           false, MDNS_REPLY_A | MDNS_REPLY_NSEC);
+}
+
+void test_mixed_questions_for_our_records_use_multicast(void) {
+  checkTwoQuestionRouting(false, g_names.instance, MDNS_TYPE_SRV, 0x8001,
+                           false, MDNS_REPLY_A | MDNS_REPLY_NSEC | MDNS_REPLY_SRV);
+}
+
+void test_duplicate_qm_and_qu_questions_use_multicast(void) {
+  checkTwoQuestionRouting(false, g_names.host, MDNS_TYPE_A, 0x8001,
+                           false, MDNS_REPLY_A | MDNS_REPLY_NSEC);
+}
+
+void test_service_qm_question_overrides_host_qu(void) {
+  checkTwoQuestionRouting(true, g_names.instance, MDNS_TYPE_SRV, 1,
+                           false, MDNS_REPLY_A | MDNS_REPLY_NSEC | MDNS_REPLY_SRV);
+}
+
+void test_legacy_mixed_questions_still_use_unicast(void) {
+  checkTwoQuestionRouting(false, g_names.host, MDNS_TYPE_A, 0x8001,
+                           true, MDNS_REPLY_A | MDNS_REPLY_NSEC, 49152);
+}
+
+void test_direct_query_without_qu_uses_unicast(void) {
+  uint8_t pkt[128];
+  size_t len = buildQuery(pkt, g_names.host, MDNS_TYPE_A, 1, 0xBEEF);
+  MdnsQueryPlan plan;
+  TEST_ASSERT_TRUE(mdnsParseQuery(pkt, len, g_names, 5353, &plan, true));
+  TEST_ASSERT_TRUE(plan.unicast);
+  TEST_ASSERT_FALSE(plan.legacy);
+
+  uint8_t out[MDNS_TX_SIZE];
+  len = mdnsBuildResponse(out, sizeof(out), plan, g_names, TEST_IP, 80, g_txt);
+  TEST_ASSERT_TRUE(len > 12);
+  TEST_ASSERT_EQUAL_UINT16(0, getU16(out, 0));
+  TEST_ASSERT_EQUAL_UINT16(0, getU16(out, 4));
+  Rec recs[8];
+  TEST_ASSERT_EQUAL_INT(2, walkAnswers(out, len, recs, 8));
+  TEST_ASSERT_NOT_NULL(findRec(recs, 2, MDNS_TYPE_A));
+  TEST_ASSERT_NOT_NULL(findRec(recs, 2, MDNS_TYPE_NSEC));
+  TEST_ASSERT_EQUAL_UINT16(0x8001, recs[0].rrClass);
+  TEST_ASSERT_EQUAL_UINT32(120, recs[0].ttl);
+}
+
+void test_direct_mixed_questions_use_unicast(void) {
+  checkTwoQuestionRouting(false, g_names.instance, MDNS_TYPE_SRV, 0x8001,
+                           true, MDNS_REPLY_A | MDNS_REPLY_NSEC | MDNS_REPLY_SRV,
+                           5353, true);
+}
+
 // ================================================================
 // D. response building
 // ================================================================
@@ -1093,6 +1215,16 @@ int main(int, char**) {
   RUN_TEST(test_a_runt_packet_is_refused);
   RUN_TEST(test_answer_sections_are_never_read);
   RUN_TEST(test_a_truncated_second_question_does_not_lose_the_first);
+  RUN_TEST(test_unrelated_qu_question_does_not_change_multicast_reply);
+  RUN_TEST(test_unrelated_qm_question_does_not_change_unicast_reply);
+  RUN_TEST(test_foreign_class_qu_question_does_not_change_multicast_reply);
+  RUN_TEST(test_unanswerable_qu_question_does_not_change_multicast_reply);
+  RUN_TEST(test_mixed_questions_for_our_records_use_multicast);
+  RUN_TEST(test_duplicate_qm_and_qu_questions_use_multicast);
+  RUN_TEST(test_service_qm_question_overrides_host_qu);
+  RUN_TEST(test_legacy_mixed_questions_still_use_unicast);
+  RUN_TEST(test_direct_query_without_qu_uses_unicast);
+  RUN_TEST(test_direct_mixed_questions_use_unicast);
 
   // D. response building
   RUN_TEST(test_nothing_is_built_for_an_empty_mask);
